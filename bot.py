@@ -1,261 +1,503 @@
-import logging
 import os
-import asyncio
+import logging
+from datetime import datetime, timedelta, time
+from calendar import monthrange, weekday
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+from aiogram.enums import ChatAction
+from aiogram.filters import Command
 import asyncpg
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import uvicorn
+from dotenv import load_dotenv
+import asyncio
+import sys
+import random
 
 # Настройка логирования
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('edubot.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Конфигурация
-TOKEN = os.getenv('TELEGRAM_TOKEN', '7513180696:AAHEhAcGDDxgic3ITpzN_jsfxSsxsLpH0Q0')
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost/dbname')
-PORT = int(os.getenv('PORT', 8000))
-WEBAPP_URL = os.getenv('WEBAPP_URL', 'https://axxalearn.up.railway.app')
+# Загрузка конфигурации
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://axxalearn.up.railway.app")
 
-# FastAPI приложение
-app = FastAPI()
+# Инициализация бота
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# Подключение статических файлов
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Вопросы для квиза
-QUESTIONS = [
-    {"id": 1, "question": "Что такое Python?", "answer": "язык программирования", "options": ["язык программирования", "змея", "фрукт", "игра"]},
-    {"id": 2, "question": "Сколько будет 2 + 2?", "answer": "4", "options": ["3", "4", "5", "6"]},
-    {"id": 3, "question": "Столица России?", "answer": "москва", "options": ["москва", "питер", "казань", "сочи"]},
-    {"id": 4, "question": "Что означает HTML?", "answer": "hypertext markup language", "options": ["hypertext markup language", "home tool markup language", "hyperlinks and text markup language", "hyperlinking text markup language"]},
-    {"id": 5, "question": "Какой год сейчас?", "answer": "2025", "options": ["2023", "2024", "2025", "2026"]}
-]
+# Подключение к базе данных
+async def get_db_connection():
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        logger.error(f"Ошибка подключения к БД: {e}")
+        raise
 
 # Инициализация базы данных
 async def init_db():
+    conn = await get_db_connection()
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS user_progress (
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id BIGINT PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                role TEXT DEFAULT 'student',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bookings (
                 id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                question_id INT NOT NULL,
-                user_answer TEXT NOT NULL,
-                is_correct BOOLEAN NOT NULL,
-                answered_at TIMESTAMP DEFAULT NOW()
+                user_id BIGINT REFERENCES users(telegram_id),
+                subject TEXT NOT NULL,
+                booking_date DATE NOT NULL,
+                booking_time TIME NOT NULL,
+                phone TEXT,
+                status TEXT DEFAULT 'confirmed',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS user_stats (
-                user_id BIGINT PRIMARY KEY,
-                total_questions INT DEFAULT 0,
-                correct_answers INT DEFAULT 0,
-                last_quiz_at TIMESTAMP DEFAULT NOW()
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS quiz_progress (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(telegram_id),
+                subject TEXT NOT NULL,
+                score INTEGER DEFAULT 0,
+                total_questions INTEGER DEFAULT 0,
+                completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
-        await conn.close()
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(telegram_id),
+                subject TEXT NOT NULL,
+                lesson_date DATE NOT NULL,
+                lesson_time TIME NOT NULL,
+                status TEXT DEFAULT 'scheduled',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         logger.info("База данных инициализирована")
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
-
-# API эндпоинты
-@app.get("/")
-async def read_root():
-    try:
-        with open("static/index.html", "r", encoding="utf-8") as f:
-            return HTMLResponse(content=f.read())
-    except FileNotFoundError:
-        return HTMLResponse(content="<h1>Quiz App</h1><p>Static files not found</p>")
-
-@app.get("/api/questions")
-async def get_questions():
-    return {"questions": QUESTIONS}
-
-@app.post("/api/submit_answer")
-async def submit_answer(request: Request):
-    try:
-        data = await request.json()
-        user_id = data.get("user_id")
-        question_id = data.get("question_id")
-        user_answer = data.get("user_answer", "").lower().strip()
-
-        if not user_id or not question_id:
-            raise HTTPException(status_code=400, detail="Missing user_id or question_id")
-
-        # Найти правильный ответ
-        correct_answer = None
-        for q in QUESTIONS:
-            if q["id"] == question_id:
-                correct_answer = q["answer"].lower().strip()
-                break
-
-        if correct_answer is None:
-            raise HTTPException(status_code=400, detail="Invalid question_id")
-
-        is_correct = user_answer == correct_answer
-
-        # Сохранить в базу
-        conn = await asyncpg.connect(DATABASE_URL)
-
-        # Сохранить ответ
-        await conn.execute(
-            "INSERT INTO user_progress (user_id, question_id, user_answer, is_correct) VALUES ($1, $2, $3, $4)",
-            user_id, question_id, user_answer, is_correct
-        )
-
-        # Обновить статистику
-        await conn.execute('''
-            INSERT INTO user_stats (user_id, total_questions, correct_answers, last_quiz_at)
-            VALUES ($1, 1, $2, NOW())
-            ON CONFLICT (user_id) DO UPDATE SET
-                total_questions = user_stats.total_questions + 1,
-                correct_answers = user_stats.correct_answers + $2,
-                last_quiz_at = NOW()
-        ''', user_id, 1 if is_correct else 0)
-
+        raise
+    finally:
         await conn.close()
 
-        return {
-            "is_correct": is_correct,
-            "correct_answer": correct_answer if not is_correct else None
-        }
+# FSM состояния
+class BookingState(StatesGroup):
+    waiting_for_subject = State()
+    waiting_for_date = State()
+    waiting_for_time = State()
+    waiting_for_phone = State()
+    waiting_for_confirmation = State()
 
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении ответа: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+# Функция для создания календаря с фильтрацией по дням недели
+def build_subject_calendar(current_date, subject):
+    today = datetime.now()
+    year = current_date.year
+    month = current_date.month
+    month_name = current_date.strftime("%B")
+    days_in_month = monthrange(year, month)[1]
+    first_day = weekday(year, month, 1)
+    calendar = []
 
-@app.get("/api/user_stats/{user_id}")
-async def get_user_stats(user_id: int):
-    try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        stats = await conn.fetchrow(
-            "SELECT total_questions, correct_answers FROM user_stats WHERE user_id = $1",
-            user_id
-        )
-        await conn.close()
+    # Определяем нужный день недели
+    if subject == "science":
+        allowed_weekday = 2  # среда (0=понедельник)
+        subject_name = "Наука"
+    elif subject == "programming":
+        allowed_weekday = 4  # пятница
+        subject_name = "Программирование"
+    else:
+        allowed_weekday = None
+        subject_name = "Предмет"
 
-        if stats:
-            return {
-                "total_questions": stats["total_questions"],
-                "correct_answers": stats["correct_answers"],
-                "accuracy": round((stats["correct_answers"] / stats["total_questions"]) * 100, 1) if stats["total_questions"] > 0 else 0
-            }
-        else:
-            return {"total_questions": 0, "correct_answers": 0, "accuracy": 0}
+    # Навигация по месяцам
+    prev_month = current_date - timedelta(days=30)
+    next_month = current_date + timedelta(days=30)
 
-    except Exception as e:
-        logger.error(f"Ошибка получения статистики: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    if current_date <= today.replace(day=1, hour=0, minute=0, second=0, microsecond=0):
+        prev_button = InlineKeyboardButton(text="◀️", callback_data="ignore")
+    else:
+        prev_button = InlineKeyboardButton(text="◀️", callback_data=f"prev_{subject}_{prev_month.year}_{prev_month.month}")
 
-# Telegram Bot
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-
-    # Получить статистику пользователя
-    try:
-        conn = await asyncpg.connect(DATABASE_URL)
-        stats = await conn.fetchrow(
-            "SELECT total_questions, correct_answers FROM user_stats WHERE user_id = $1",
-            user_id
-        )
-        await conn.close()
-
-        if stats and stats["total_questions"] > 0:
-            accuracy = round((stats["correct_answers"] / stats["total_questions"]) * 100, 1)
-            stats_text = f"\n\nТвоя статистика:\n📊 Вопросов отвечено: {stats['total_questions']}\n✅ Правильных ответов: {stats['correct_answers']}\n🎯 Точность: {accuracy}%"
-        else:
-            stats_text = ""
-
-    except Exception as e:
-        logger.error(f"Ошибка получения статистики: {e}")
-        stats_text = ""
-
-    keyboard = [
-        [InlineKeyboardButton("🧠 Пройти квиз", web_app=WebAppInfo(url=WEBAPP_URL))]
+    header = [
+        InlineKeyboardButton(text=f"{subject_name}", callback_data="ignore"),
+        InlineKeyboardButton(text=f"{month_name} {year}", callback_data="ignore"),
+        prev_button,
+        InlineKeyboardButton(text="▶️", callback_data=f"next_{subject}_{next_month.year}_{next_month.month}")
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    calendar.append(header)
 
-    await update.message.reply_text(
-        f'Привет, {update.effective_user.first_name}! 👋\n\n'
-        f'Добро пожаловать в квиз-бот! Проверь свои знания, ответив на 5 вопросов.{stats_text}',
-        reply_markup=reply_markup
+    # Дни недели
+    days_of_week = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    calendar.append([InlineKeyboardButton(text=day, callback_data="ignore") for day in days_of_week])
+
+    # Дни месяца
+    week = []
+    for _ in range(first_day):
+        week.append(InlineKeyboardButton(text=" ", callback_data="ignore"))
+
+    for day in range(1, days_in_month + 1):
+        current_day = datetime(year, month, day)
+
+        # Проверяем: день в прошлом или не тот день недели
+        if current_day < today or (allowed_weekday is not None and current_day.weekday() != allowed_weekday):
+            week.append(InlineKeyboardButton(text="·", callback_data="ignore"))
+        else:
+            week.append(InlineKeyboardButton(text=str(day), callback_data=f"date_{subject}_{year}_{month}_{day}"))
+
+        if (first_day + day - 1) % 7 == 6:  # Конец недели
+            calendar.append(week)
+            week = []
+
+    if week:
+        while len(week) < 7:
+            week.append(InlineKeyboardButton(text=" ", callback_data="ignore"))
+        calendar.append(week)
+
+    return InlineKeyboardMarkup(inline_keyboard=calendar)
+
+# Основное меню
+def get_main_menu():
+    keyboard = [
+        [InlineKeyboardButton(text="📚 Пройти домашку", web_app=WebAppInfo(url=f"{WEBAPP_URL}/quiz"))],
+        [InlineKeyboardButton(text="📅 Записаться на занятие", callback_data="book_lesson")],
+        [InlineKeyboardButton(text="📊 Мой прогресс", web_app=WebAppInfo(url=f"{WEBAPP_URL}/progress"))],
+        [InlineKeyboardButton(text="🗓 Моё расписание", web_app=WebAppInfo(url=f"{WEBAPP_URL}/schedule"))],
+        [InlineKeyboardButton(text="🎯 Секретный раздел", web_app=WebAppInfo(url=f"{WEBAPP_URL}/secret"))]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# Меню выбора предмета для записи
+def get_subject_menu():
+    keyboard = [
+        [InlineKeyboardButton(text="🧪 Наука (среда)", callback_data="subject_science")],
+        [InlineKeyboardButton(text="💻 Программирование (пятница)", callback_data="subject_programming")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# Меню выбора времени
+def get_time_menu(subject):
+    times = ["16:00", "17:00", "18:00", "19:00", "20:00"]
+    keyboard = []
+    for time_slot in times:
+        keyboard.append([InlineKeyboardButton(text=f"🕐 {time_slot}", callback_data=f"time_{subject}_{time_slot}")])
+    keyboard.append([InlineKeyboardButton(text="◀️ Назад к календарю", callback_data=f"back_to_calendar_{subject}")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# Команда /start
+@dp.message(Command("start"))
+async def start_command(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    username = message.from_user.username
+    full_name = message.from_user.full_name
+
+    await state.clear()
+
+    # Сохраняем пользователя в БД
+    conn = await get_db_connection()
+    try:
+        await conn.execute(
+            "INSERT INTO users (telegram_id, username, full_name) VALUES ($1, $2, $3) ON CONFLICT (telegram_id) DO UPDATE SET username = $2, full_name = $3",
+            user_id, username, full_name
+        )
+        logger.info(f"Пользователь {user_id} ({username}) сохранён в БД")
+    finally:
+        await conn.close()
+
+    welcome_text = f"""
+🎓 Привет, {full_name}! 
+
+Добро пожаловать в твой персональный образовательный помощник! 
+
+Здесь ты можешь:
+• Проходить домашние задания в виде квизов
+• Записываться на занятия
+• Отслеживать свой прогресс
+• Смотреть расписание
+• Открыть секретный раздел 🎯
+
+Выбери, что хочешь сделать:
+    """
+
+    await message.answer(welcome_text, reply_markup=get_main_menu())
+
+# Обработка записи на занятие
+@dp.callback_query(lambda c: c.data == "book_lesson")
+async def book_lesson_start(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text(
+        "📅 Выбери предмет для записи:
+
+"
+        "🧪 Наука — по средам
+"
+        "💻 Программирование — по пятницам",
+        reply_markup=get_subject_menu()
+    )
+    await state.set_state(BookingState.waiting_for_subject)
+    await callback_query.answer()
+
+# Выбор предмета
+@dp.callback_query(lambda c: c.data.startswith("subject_"))
+async def select_subject(callback_query: types.CallbackQuery, state: FSMContext):
+    subject = callback_query.data.split("_")[1]  # science или programming
+    await state.update_data(subject=subject)
+
+    subject_names = {"science": "Наука", "programming": "Программирование"}
+    subject_days = {"science": "среды", "programming": "пятницы"}
+
+    current_date = datetime.now()
+    calendar_markup = build_subject_calendar(current_date, subject)
+
+    await callback_query.message.edit_text(
+        f"📅 Выбери дату для занятия по предмету {subject_names[subject]}
+"
+        f"Доступны только {subject_days[subject]}:",
+        reply_markup=calendar_markup
+    )
+    await state.set_state(BookingState.waiting_for_date)
+    await callback_query.answer()
+
+# Навигация по календарю
+@dp.callback_query(lambda c: c.data.startswith("prev_") or c.data.startswith("next_"))
+async def navigate_calendar(callback_query: types.CallbackQuery, state: FSMContext):
+    data_parts = callback_query.data.split("_")
+    direction = data_parts[0]  # prev или next
+    subject = data_parts[1]
+    year = int(data_parts[2])
+    month = int(data_parts[3])
+
+    current_date = datetime(year, month, 1)
+    calendar_markup = build_subject_calendar(current_date, subject)
+
+    subject_names = {"science": "Наука", "programming": "Программирование"}
+    subject_days = {"science": "среды", "programming": "пятницы"}
+
+    await callback_query.message.edit_reply_markup(reply_markup=calendar_markup)
+    await callback_query.answer()
+
+# Выбор даты
+@dp.callback_query(lambda c: c.data.startswith("date_"))
+async def select_date(callback_query: types.CallbackQuery, state: FSMContext):
+    data_parts = callback_query.data.split("_")
+    subject = data_parts[1]
+    year = int(data_parts[2])
+    month = int(data_parts[3])
+    day = int(data_parts[4])
+
+    selected_date = datetime(year, month, day)
+    await state.update_data(booking_date=selected_date)
+
+    subject_names = {"science": "Наука", "programming": "Программирование"}
+
+    await callback_query.message.edit_text(
+        f"🕐 Выбери время для занятия по предмету {subject_names[subject]}
+"
+        f"📅 Дата: {selected_date.strftime('%d.%m.%Y')} ({selected_date.strftime('%A')})",
+        reply_markup=get_time_menu(subject)
+    )
+    await state.set_state(BookingState.waiting_for_time)
+    await callback_query.answer()
+
+# Выбор времени
+@dp.callback_query(lambda c: c.data.startswith("time_"))
+async def select_time(callback_query: types.CallbackQuery, state: FSMContext):
+    data_parts = callback_query.data.split("_")
+    subject = data_parts[1]
+    selected_time = data_parts[2]
+
+    await state.update_data(booking_time=selected_time)
+
+    # Запрашиваем номер телефона
+    phone_keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
 
-async def run_bot():
+    await callback_query.message.answer(
+        "📱 Поделись номером телефона для подтверждения записи:",
+        reply_markup=phone_keyboard
+    )
+    await state.set_state(BookingState.waiting_for_phone)
+    await callback_query.answer()
+
+# Получение номера телефона
+@dp.message(BookingState.waiting_for_phone)
+async def get_phone(message: types.Message, state: FSMContext):
+    phone = None
+
+    if message.contact:
+        phone = message.contact.phone_number
+    elif message.text and message.text.replace("+", "").replace(" ", "").replace("-", "").isdigit():
+        phone = message.text
+    else:
+        await message.answer("❌ Пожалуйста, поделись номером телефона или введи корректный номер")
+        return
+
+    await state.update_data(phone=phone)
+
+    # Показываем подтверждение
+    data = await state.get_data()
+    subject = data["subject"]
+    booking_date = data["booking_date"]
+    booking_time = data["booking_time"]
+
+    subject_names = {"science": "Наука", "programming": "Программирование"}
+
+    confirm_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить запись", callback_data="confirm_booking")],
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_booking")]
+    ])
+
+    confirmation_text = f"""
+📋 Подтверди запись:
+
+👤 Имя: {message.from_user.full_name}
+📚 Предмет: {subject_names[subject]}
+📅 Дата: {booking_date.strftime('%d.%m.%Y')} ({booking_date.strftime('%A')})
+🕐 Время: {booking_time}
+📱 Телефон: {phone}
+
+Всё верно?
+    """
+
+    await message.answer(
+        confirmation_text,
+        reply_markup=confirm_keyboard,
+        reply_keyboard_remove=True
+    )
+    await state.set_state(BookingState.waiting_for_confirmation)
+
+# Подтверждение записи
+@dp.callback_query(lambda c: c.data == "confirm_booking")
+async def confirm_booking(callback_query: types.CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    data = await state.get_data()
+
+    subject = data["subject"]
+    booking_date = data["booking_date"]
+    booking_time = data["booking_time"]
+    phone = data["phone"]
+
+    # Сохраняем в БД
+    conn = await get_db_connection()
     try:
-        application = ApplicationBuilder().token(TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-
-        logger.info("Инициализация Telegram бота...")
-        await application.initialize()
-
-        logger.info("Запуск Telegram бота...")
-        await application.start()
-        await application.updater.start_polling()
-
-        # Держим бота живым
-        logger.info("Telegram бот запущен и работает")
-        while True:
-            await asyncio.sleep(3600)  # Спим час, потом проверяем снова
-
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
-        raise
-    finally:
-        try:
-            if 'application' in locals():
-                await application.stop()
-                await application.shutdown()
-        except Exception as e:
-            logger.error(f"Ошибка остановки бота: {e}")
-
-async def run_fastapi():
-    try:
-        config = uvicorn.Config(
-            app, 
-            host="0.0.0.0", 
-            port=PORT, 
-            log_level="info",
-            access_log=True
+        await conn.execute(
+            "INSERT INTO bookings (user_id, subject, booking_date, booking_time, phone) VALUES ($1, $2, $3, $4, $5)",
+            user_id, subject, booking_date.date(), time.fromisoformat(booking_time), phone
         )
-        server = uvicorn.Server(config)
-
-        logger.info(f"Запуск FastAPI сервера на порту {PORT}...")
-        await server.serve()
-    except Exception as e:
-        logger.error(f"Ошибка запуска FastAPI: {e}")
-        raise
-
-async def main():
-    try:
-        # Инициализация БД
-        logger.info("Инициализация базы данных...")
-        await init_db()
-
-        # Создание задач для параллельного выполнения
-        logger.info("Создание задач для бота и API...")
-        bot_task = asyncio.create_task(run_bot())
-        fastapi_task = asyncio.create_task(run_fastapi())
-
-        # Запуск обеих задач параллельно
-        logger.info("Запуск бота и API сервера...")
-        await asyncio.gather(bot_task, fastapi_task)
-
-    except KeyboardInterrupt:
-        logger.info("Получен сигнал остановки...")
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
-        raise
+        logger.info(f"Запись создана: {user_id} - {subject} - {booking_date} - {booking_time}")
     finally:
-        logger.info("Завершение работы приложения")
+        await conn.close()
 
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Приложение остановлено пользователем")
-    except Exception as e:
-        logger.error(f"Ошибка запуска приложения: {e}")
+    subject_names = {"science": "Наука", "programming": "Программирование"}
+
+    success_text = f"""
+✅ Запись подтверждена!
+
+📚 {subject_names[subject]}
+📅 {booking_date.strftime('%d.%m.%Y')} в {booking_time}
+
+Мы отправим напоминание за день до занятия.
+Увидимся на уроке! 🎓
+    """
+
+    await callback_query.message.edit_text(success_text, reply_markup=get_main_menu())
+    await state.clear()
+    await callback_query.answer("Запись успешно создана! ✅")
+
+# Отмена записи
+@dp.callback_query(lambda c: c.data == "cancel_booking")
+async def cancel_booking(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text(
+        "❌ Запись отменена.
+
+Можешь записаться в любое время!",
+        reply_markup=get_main_menu()
+    )
+    await state.clear()
+    await callback_query.answer("Запись отменена")
+
+# Возврат в главное меню
+@dp.callback_query(lambda c: c.data == "back_to_main")
+async def back_to_main(callback_query: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback_query.message.edit_text(
+        "🎓 Главное меню
+
+Выбери, что хочешь сделать:",
+        reply_markup=get_main_menu()
+    )
+    await callback_query.answer()
+
+# Возврат к календарю
+@dp.callback_query(lambda c: c.data.startswith("back_to_calendar_"))
+async def back_to_calendar(callback_query: types.CallbackQuery, state: FSMContext):
+    subject = callback_query.data.split("_")[3]
+
+    current_date = datetime.now()
+    calendar_markup = build_subject_calendar(current_date, subject)
+
+    subject_names = {"science": "Наука", "programming": "Программирование"}
+    subject_days = {"science": "среды", "programming": "пятницы"}
+
+    await callback_query.message.edit_text(
+        f"📅 Выбери дату для занятия по предмету {subject_names[subject]}
+"
+        f"Доступны только {subject_days[subject]}:",
+        reply_markup=calendar_markup
+    )
+    await state.set_state(BookingState.waiting_for_date)
+    await callback_query.answer()
+
+# Игнорирование пустых кнопок
+@dp.callback_query(lambda c: c.data == "ignore")
+async def ignore_callback(callback_query: types.CallbackQuery):
+    await callback_query.answer()
+
+# Обработка текстовых сообщений (возврат в меню)
+@dp.message()
+async def handle_text(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+
+    # Если пользователь не в процессе записи, показываем главное меню
+    if current_state is None:
+        await message.answer(
+            "🎓 Главное меню
+
+Выбери, что хочешь сделать:",
+            reply_markup=get_main_menu()
+        )
+
+# Запуск бота
+async def main():
+    logger.info("Запуск образовательного бота...")
+    await init_db()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
