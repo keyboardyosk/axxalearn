@@ -188,15 +188,29 @@ async def run_bot():
     try:
         application = ApplicationBuilder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
-        logger.info("Запуск Telegram бота...")
 
+        logger.info("Инициализация Telegram бота...")
         await application.initialize()
+
+        logger.info("Запуск Telegram бота...")
         await application.start()
         await application.updater.start_polling()
+
+        # Держим бота живым
+        logger.info("Telegram бот запущен и работает")
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(3600)  # Спим час, потом проверяем снова
+
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
+        raise
+    finally:
+        try:
+            if 'application' in locals():
+                await application.stop()
+                await application.shutdown()
+        except Exception as e:
+            logger.error(f"Ошибка остановки бота: {e}")
 
 async def run_fastapi():
     try:
@@ -213,6 +227,7 @@ async def run_fastapi():
         await server.serve()
     except Exception as e:
         logger.error(f"Ошибка запуска FastAPI: {e}")
+        raise
 
 async def main():
     try:
@@ -233,6 +248,7 @@ async def main():
         logger.info("Получен сигнал остановки...")
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}")
+        raise
     finally:
         logger.info("Завершение работы приложения")
 
