@@ -8,7 +8,6 @@ from fastapi.responses import HTMLResponse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import uvicorn
-from threading import Thread
 
 # Настройка логирования
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv('TELEGRAM_TOKEN', '7513180696:AAHEhAcGDDxgic3ITpzN_jsfxSsxsLpH0Q0')
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost/dbname')
 PORT = int(os.getenv('PORT', 8000))
-WEBAPP_URL = os.getenv('WEBAPP_URL', 'https://your-app.railway.app')
+WEBAPP_URL = os.getenv('WEBAPP_URL', 'https://axxalearn.up.railway.app')
 
 # FastAPI приложение
 app = FastAPI()
@@ -65,8 +64,11 @@ async def init_db():
 # API эндпоинты
 @app.get("/")
 async def read_root():
-    with open("static/index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read())
+    try:
+        with open("static/index.html", "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Quiz App</h1><p>Static files not found</p>")
 
 @app.get("/api/questions")
 async def get_questions():
@@ -183,24 +185,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def run_bot():
-    application = ApplicationBuilder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    await application.run_polling()
+    try:
+        application = ApplicationBuilder().token(TOKEN).build()
+        application.add_handler(CommandHandler("start", start))
 
-def run_fastapi():
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+        logger.info("Запуск Telegram бота...")
+        await application.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logger.error(f"Ошибка запуска бота: {e}")
+
+async def run_fastapi():
+    try:
+        config = uvicorn.Config(
+            app, 
+            host="0.0.0.0", 
+            port=PORT, 
+            log_level="info",
+            access_log=True
+        )
+        server = uvicorn.Server(config)
+
+        logger.info(f"Запуск FastAPI сервера на порту {PORT}...")
+        await server.serve()
+    except Exception as e:
+        logger.error(f"Ошибка запуска FastAPI: {e}")
 
 async def main():
-    # Инициализация БД
-    await init_db()
+    try:
+        # Инициализация БД
+        logger.info("Инициализация базы данных...")
+        await init_db()
 
-    # Запуск бота в отдельном потоке
-    bot_thread = Thread(target=lambda: asyncio.run(run_bot()))
-    bot_thread.daemon = True
-    bot_thread.start()
+        # Создание задач для параллельного выполнения
+        logger.info("Создание задач для бота и API...")
+        bot_task = asyncio.create_task(run_bot())
+        fastapi_task = asyncio.create_task(run_fastapi())
 
-    # Запуск FastAPI
-    run_fastapi()
+        # Запуск обеих задач параллельно
+        logger.info("Запуск бота и API сервера...")
+        await asyncio.gather(bot_task, fastapi_task)
+
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал остановки...")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+    finally:
+        logger.info("Завершение работы приложения")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Приложение остановлено пользователем")
+    except Exception as e:
+        logger.error(f"Ошибка запуска приложения: {e}")
