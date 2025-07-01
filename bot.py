@@ -188,9 +188,13 @@ async def run_bot():
     try:
         application = ApplicationBuilder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
-
         logger.info("Запуск Telegram бота...")
-        await application.run_polling(drop_pending_updates=True)
+
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        while True:
+            await asyncio.sleep(3600)
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
 
