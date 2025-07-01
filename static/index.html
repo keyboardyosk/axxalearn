@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Квиз Мини-Приложение</title>
+    <link rel="stylesheet" href="static/style.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div id="quiz-container">
+        <div id="progress-bar">
+            <div id="progress-fill"></div>
+        </div>
+        <div id="question-counter">Вопрос <span id="current-question">1</span> из <span id="total-questions">5</span></div>
+        <div id="question">Загрузка...</div>
+        <div id="options-container"></div>
+        <div id="result-container" style="display: none;">
+            <div id="result-message"></div>
+            <button id="next-button">Следующий вопрос</button>
+        </div>
+        <div id="final-result" style="display: none;">
+            <h2>🎉 Квиз завершен!</h2>
+            <div id="final-stats"></div>
+            <button id="restart-button">Пройти еще раз</button>
+        </div>
+    </div>
+    <script src="static/script.js"></script>
+</body>
+</html>
