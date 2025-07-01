@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.FileHandler('edubot.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -270,8 +270,7 @@ async def select_subject(callback_query: types.CallbackQuery, state: FSMContext)
     calendar_markup = build_subject_calendar(current_date, subject)
 
     await callback_query.message.edit_text(
-        f"📅 Выбери дату для занятия по предмету {subject_names[subject]}
-"
+        f"📅 Выбери дату для занятия по предмету {subject_names[subject]}\n"
         f"Доступны только {subject_days[subject]}:",
         reply_markup=calendar_markup
     )
@@ -311,8 +310,7 @@ async def select_date(callback_query: types.CallbackQuery, state: FSMContext):
     subject_names = {"science": "Наука", "programming": "Программирование"}
 
     await callback_query.message.edit_text(
-        f"🕐 Выбери время для занятия по предмету {subject_names[subject]}
-"
+        f"🕐 Выбери время для занятия по предмету {subject_names[subject]}\n"
         f"📅 Дата: {selected_date.strftime('%d.%m.%Y')} ({selected_date.strftime('%A')})",
         reply_markup=get_time_menu(subject)
     )
@@ -431,9 +429,7 @@ async def confirm_booking(callback_query: types.CallbackQuery, state: FSMContext
 @dp.callback_query(lambda c: c.data == "cancel_booking")
 async def cancel_booking(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_text(
-        "❌ Запись отменена.
-
-Можешь записаться в любое время!",
+        """❌ Запись отменена.\n\nМожешь записаться в любое время!""",
         reply_markup=get_main_menu()
     )
     await state.clear()
@@ -444,9 +440,7 @@ async def cancel_booking(callback_query: types.CallbackQuery, state: FSMContext)
 async def back_to_main(callback_query: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback_query.message.edit_text(
-        "🎓 Главное меню
-
-Выбери, что хочешь сделать:",
+        """🎓 Главное меню\n\nВыбери, что хочешь сделать:\n\n""",
         reply_markup=get_main_menu()
     )
     await callback_query.answer()
@@ -463,9 +457,7 @@ async def back_to_calendar(callback_query: types.CallbackQuery, state: FSMContex
     subject_days = {"science": "среды", "programming": "пятницы"}
 
     await callback_query.message.edit_text(
-        f"📅 Выбери дату для занятия по предмету {subject_names[subject]}
-"
-        f"Доступны только {subject_days[subject]}:",
+        f"""📅 Выбери дату для занятия по предмету {subject_names[subject]}\nДоступны только {subject_days[subject]}:""",
         reply_markup=calendar_markup
     )
     await state.set_state(BookingState.waiting_for_date)
@@ -484,9 +476,7 @@ async def handle_text(message: types.Message, state: FSMContext):
     # Если пользователь не в процессе записи, показываем главное меню
     if current_state is None:
         await message.answer(
-            "🎓 Главное меню
-
-Выбери, что хочешь сделать:",
+            """🎓 Главное меню\n\nВыбери, что хочешь сделать:""",
             reply_markup=get_main_menu()
         )
 
