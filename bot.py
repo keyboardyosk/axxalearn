@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('edubot.log', encoding='utf-8'),
+        logging.FileHandler('bot.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -249,14 +249,11 @@ async def start_command(message: types.Message, state: FSMContext):
 @dp.callback_query(lambda c: c.data == "book_lesson")
 async def book_lesson_start(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.message.edit_text(
-        "📅 Выбери предмет для записи:
-
-"
-        "🧪 Наука — по средам
-"
-        "💻 Программирование — по пятницам",
-        reply_markup=get_subject_menu()
-    )
+    "📅 Выбери предмет для записи:\n"
+    "🧪 Наука — по средам\n"
+    "💻 Программирование — по пятницам",
+    reply_markup=get_subject_menu()
+)
     await state.set_state(BookingState.waiting_for_subject)
     await callback_query.answer()
 
