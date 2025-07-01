@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Загрузка конфигурации
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://axxalearn.up.railway.app")
