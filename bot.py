@@ -13,7 +13,7 @@ TOKEN = '7513180696:AAHEhAcGDDxgic3ITpzN_jsfxSsxsLpH0Q0'
 
 # Функция для обработки команды /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    web_app_url = "https://<username>.github.io/<repository>"  # Замените на URL твоего веб-приложения
+    web_app_url = "https://keyboardyosk.github.io/axxalearn"  # Замените на корректный URL твоего веб-приложения
     keyboard = [
         [InlineKeyboardButton("Open Quiz Mini App", web_app=WebAppInfo(url=web_app_url))]
     ]
